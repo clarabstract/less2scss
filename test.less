@@ -129,3 +129,14 @@ body ^^ .shadow {
 }
 
 @import url("//fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,700italic,400,300,700");
+
+
+.parent, .parent2 {
+  &-state, section& , &.normal, & > .also-normal, .full-normal {
+    display: block;
+    &-ohgod, .child-normal {
+      display: none;
+    }
+  }
+}
+

@@ -1,6 +1,18 @@
 var less = require('less');
 
-var INDENT = "    "
+function clone(obj){
+    if(obj == null || typeof(obj) != 'object')
+        return obj;
+
+    var temp = obj.constructor(); // changed
+
+    for(var key in obj)
+        temp[key] = clone(obj[key]);
+    return temp;
+}
+
+var INDENT = "    ";
+var NEST_LATER_TOKEN = "<<nest-later>>";
 
 var parser = new(less.Parser)({
 	paths: ['.'],
@@ -107,7 +119,7 @@ function emitProperty(node, indent) {
 }
 
 function emitSelector(selector) {
-	var output = ""
+	var output = "";
 	for (var i = 0; i < selector.elements.length; i++) {
 		var element = selector.elements[i]
 		var combinator = element.combinator.value
@@ -151,19 +163,26 @@ function emitSelector(selector) {
 		
 		if (value === "&") {
 			var next = selector.elements[i+1]
-			if( next && next.combinator.value === "" && next.value.match(/^[-_a-zA-Z0=9]/)) {
-				value = "#{&}"
-			}
-		};
 
+			// Problematic uses of &:
+			// 		- attmepts to connect to a tag selector
+			//		- is not the first selector in the chain
+			// Sass minds these a lot - we have to generate a new block after the parent block and do the substitution
+			// ourselves :(
+			if( i > 0 || (next && next.combinator.value === "" || next.value.match(/^[-_a-zA-Z0=9]/))) {
+				nestLater = true;
+				value = NEST_LATER_TOKEN
+			} 
+		}
 
 		output += value
+
 		
 	};
 	return output
 
 }
-function emitRuleBlock(rules, indent) {
+function emitRuleBlock(rules, indent, parent) {
 	output = " {\n"
 
 	for (var i = 0; i < rules.length; i++) {
@@ -171,19 +190,26 @@ function emitRuleBlock(rules, indent) {
 		if (rule.name) {
 			output += emitProperty(rule, indent + INDENT) + "\n"
 		} else {
-			output += emit(rule, indent + INDENT)
+			output += emit(rule, indent + INDENT, parent)
 		}
 	};
 	output += indent
 	output += "}\n\n"
 	return output
 }
-function emit(node, indent) {
+function emit(node, indent, parent) {
 	try {
 		var output = indent;
 
+		node.parent = parent;
+
 		if (node.root && node.root !== true) {
 			return output + emit(node.root, indent)
+		};
+
+		if (node.silent && node.value) {
+			// It's a comment
+			return output + node.value + "\n";
 		};
 
 		if (node.path) {
@@ -191,9 +217,59 @@ function emit(node, indent) {
 		};
 		
 		if (node.selectors) {
-			output += node.selectors.map(emitSelector).join(', ');
-			output += emitRuleBlock(node.rules, indent)
-			return output
+			var selectors = node.selectors.map(emitSelector);
+			var regularSelectors = [];
+			var appendToParent = []
+			for (var i = 0; i < selectors.length; i++) {
+				var selector = selectors[i];
+				if (selector.match(NEST_LATER_TOKEN)) {
+					if (!parent && parent.rules) {
+						console.error("&-marker used outside parent", node);
+						debugger
+						throw("parentrefinorphan")
+					};
+					for (var j = 0; j < parent.resolvedSelectors.length; j++) {
+						appendToParent.push(
+							selector.replace(NEST_LATER_TOKEN, parent.resolvedSelectors[j]));
+					};
+				} else {
+					regularSelectors.push(selector);
+				};
+			};
+			if (appendToParent.length > 0) {
+				// Clone a self to append to parent
+
+				// Temporarily clear parent to avoid cyclic clone...
+				node.parent = null;
+				var newRule = clone(node)
+				node.parent = parent;
+				// Reset selectors and add the resolved ones we wish to pass on:
+				newRule.selectors = []
+				for (var i = 0; i < appendToParent.length; i++) {
+					newRule.selectors.push({
+						elements: [{
+							combinator: {value: ''},
+							value: appendToParent[i]
+						}]
+					});
+				};
+				newRule.parent = parent.parent;
+				idx = parent.parent.rules.indexOf(parent)
+				if (idx == -1) {throw('orphan')};
+				parent.parent.rules.splice(idx+1, 0, newRule);
+			};
+
+			node.resolvedSelectors = regularSelectors;
+			blockContent = emitRuleBlock(node.rules, indent, node);
+
+			if (regularSelectors.length === 0 || !blockContent.match(/[^\s{}]/)) {
+				return ''
+			};
+
+			output += regularSelectors.join(', ');
+			output += blockContent;
+			return output;
+
 		};
 
 		if (node.selector) {
@@ -202,8 +278,7 @@ function emit(node, indent) {
 				var mixin = els[0]
 				if (mixin.combinator && mixin.combinator.value === "" && mixin.value.match(/^\.[_a-zA-Z0-9]/)) {
 					console.warn("Assuming "+mixin.value+" is a mixin!")
-					return output + "+" + mixin.value.slice(1) + "(" + node.arguments.map(emitMixinArgValue).join(', ') + ");\n";
-
+					return output + "@include " + mixin.value.slice(1) + "(" + node.arguments.map(emitMixinArgValue).join(', ') + ");\n";
 				};
 
 			};
@@ -220,20 +295,20 @@ function emit(node, indent) {
 					debugger
 					throw("multiblock")
 				};
-				return output + node.name + emitRuleBlock(node.rules[0].rules, indent)
+				return output + node.name + emitRuleBlock(node.rules[0].rules, indent, parent)
 			} else {
 				values = node.value.value
 				if (!Array.isArray(values)) {
 					values = [node.value]
 				};
-				return output + node.name + "(" + values.map(emitValue).join(' ') + ");\n";
+				return output + node.name + " " + values.map(emitValue).join(' ') + ";\n";
 			}
 			
 		}
 
 		if (node.rules) {
 			for (var i = 0; i < node.rules.length; i++) {
-				output += emit(node.rules[i], indent)
+				output += emit(node.rules[i], indent, node)
 			};
 			return output
 		};
